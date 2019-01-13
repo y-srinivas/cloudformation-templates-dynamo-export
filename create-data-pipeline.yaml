@@ -173,7 +173,7 @@ Resources:
         # DO NOT CHANGE NAME. CloudFormation docs are wrong. Use Glue API docs:
         # http://docs.aws.amazon.com/glue/latest/dg/aws-glue-api-jobs-job.html#aws-glue-api-jobs-job-JobCommand
         Name: "glueetl"
-        ScriptLocation: "s3.amazonaws.com/reporting-sy-scripts/dynamodb-export-to-parquet.py"
+        ScriptLocation: "s3://amazonaws.com/reporting-sy-scripts/dynamodb-export-to-parquet.py"
       AllocatedCapacity: 30
       ExecutionProperty:
         MaxConcurrentRuns: 3

@@ -1,0 +1,149 @@
+Description: Template for setting up common infrastructure for exporting DynamoDB tables to S3 with Data Pipelines
+Resources:
+  DataPipelinesDynamoDBExportRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: DataPipelinesDynamoDBExportRole
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AWSDataPipelineRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+              - "elasticmapreduce.amazonaws.com"
+              - "datapipeline.amazonaws.com"
+            Action:
+            - "sts:AssumeRole"
+
+  EC2DynamoDBExportRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: EC2DynamoDBExportRole
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforDataPipelineRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+              - "ec2.amazonaws.com"
+              - "elasticmapreduce.amazonaws.com"
+              - "datapipeline.amazonaws.com"
+            Action:
+            - "sts:AssumeRole"
+
+  EC2DynamoDBExportInstanceProfile:
+    Type: "AWS::IAM::InstanceProfile"
+    DependsOn:
+    - EC2DynamoDBExportRole
+    Properties:
+      Roles:
+      - Ref: EC2DynamoDBExportRole
+
+  DynamoDBExportsBucket:
+    Type: "AWS::S3::Bucket"
+    Properties:
+      BucketName:
+        Fn::Sub: "dynamodb-exports-${AWS::AccountId}-${AWS::Region}"
+  
+  ExportSuccessExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Action:
+          - sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/AWSLambdaExecute
+      Policies:
+      - PolicyName: DynamoDBExportSuccessLambdaTrigger
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          - Action:
+            - glue:StartJobRun
+            Effect: Allow
+            Resource: "*"
+
+  ExportFailureExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Action:
+          - sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/AWSLambdaExecute
+
+  GlueCrawlerAndJobRole:
+    Type: AWS::IAM::Role
+    Properties:
+      # Referenced the following documentation while creating this IAM Role
+      # http://docs.aws.amazon.com/glue/latest/dg/create-an-iam-role.html
+      RoleName: AWSGlueServiceRoleDefault
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: glue.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/AmazonS3FullAccess
+      - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      - arn:aws:iam::aws:policy/AWSGlueConsoleFullAccess
+
+Outputs:
+  DataPipelinesDynamoDBExportRole:
+    Description: IAM Role for Data Pipelines
+    Export:
+      Name: DataPipelinesDynamoDBExportRole
+    Value:
+      Ref: DataPipelinesDynamoDBExportRole
+  EC2DynamoDBExportInstanceProfile:
+    Description: EC2 Instance profile for Data Pipelines
+    Export:
+      Name: EC2DynamoDBExportInstanceProfile
+    Value:
+      Ref: EC2DynamoDBExportInstanceProfile
+  DynamoDBExportsBucket:
+    Description: S3 bucket for DynamoDB exports
+    Export:
+      Name: DynamoDBExportsBucket
+    Value:
+      Ref: DynamoDBExportsBucket
+  ExportSuccessExecutionRoleArn:
+    Description: IAM Role for export success triggers
+    Export: 
+      Name: ExportSuccessExecutionRoleArn
+    Value:
+      Fn::GetAtt:
+      - ExportSuccessExecutionRole
+      - Arn
+  ExportFailureExecutionRole:
+    Description: IAM Role for export failure triggers
+    Export:
+      Name: ExportFailureExecutionRole
+    Value:
+      Fn::GetAtt:
+      - ExportFailureExecutionRole
+      - Arn
+  GlueCrawlerAndJobRole:
+    Description: IAM Role for Glue Crawlers and Jobs
+    Export:
+      Name: GlueCrawlerAndJobRole
+    Value:
+      Ref: GlueCrawlerAndJobRole

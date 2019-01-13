@@ -1,0 +1,101 @@
+{
+    "Description": "An example DynamoDB table for storing Persons and Activity",
+    "Resources": {
+        "PersonTable": {
+            "Type": "AWS::DynamoDB::Table",
+            "Properties": {
+                "TableName": "WSG-RETIREREADY-Person",
+                "KeySchema": [
+                    {
+                        "AttributeName": "SSOID",
+                        "KeyType": "HASH"
+                    },
+                    {
+                        "AttributeName": "ChallengeID",
+                        "KeyType": "RANGE"
+                    }
+                ],
+                "AttributeDefinitions": [
+                    {
+                        "AttributeName": "SSOID",
+                        "AttributeType": "N"
+                    },
+                    {
+                        "AttributeName": "ChallengeID",
+                        "AttributeType": "N"
+                    }
+                ],
+                "ProvisionedThroughput": {
+                    "ReadCapacityUnits": 5,
+                    "WriteCapacityUnits": 5
+                }
+            }
+        },
+        "ChallengeTable": {
+            "Type": "AWS::DynamoDB::Table",
+            "Properties": {
+                "TableName": "WSG-RETIREREADY-Challenge",
+                "KeySchema": [
+                    {
+                        "AttributeName": "ChallengeID",
+                        "KeyType": "HASH"
+                    }
+                ],
+                "AttributeDefinitions": [
+                    {
+                        "AttributeName": "ChallengeID",
+                        "AttributeType": "N"
+                    }
+                ],
+                "ProvisionedThroughput": {
+                    "ReadCapacityUnits": 5,
+                    "WriteCapacityUnits": 5
+                }
+            }
+        },
+        "ActivityTable": {
+            "Type": "AWS::DynamoDB::Table",
+            "Properties": {
+                "TableName": "WSG-RETIREREADY-Activity",
+                "KeySchema": [
+                    {
+                        "AttributeName": "ActivityID",
+                        "KeyType": "HASH"
+                    }
+                ],
+                "AttributeDefinitions": [
+                    {
+                        "AttributeName": "ActivityID",
+                        "AttributeType": "N"
+                    }
+                ],
+                "ProvisionedThroughput": {
+                    "ReadCapacityUnits": 5,
+                    "WriteCapacityUnits": 5
+                }
+            }
+        },
+        "PersonActivityTable": {
+            "Type": "AWS::DynamoDB::Table",
+            "Properties": {
+                "TableName": "WSG-RETIREREADY-PesrsonActivity",
+                "KeySchema": [
+                    {
+                        "AttributeName": "SSOID",
+                        "KeyType": "HASH"
+                    }
+                ],
+                "AttributeDefinitions": [
+                    {
+                        "AttributeName": "SSOID",
+                        "AttributeType": "N"
+                    }
+                ],
+                "ProvisionedThroughput": {
+                    "ReadCapacityUnits": 5,
+                    "WriteCapacityUnits": 5
+                }
+            }
+        }
+    }
+}

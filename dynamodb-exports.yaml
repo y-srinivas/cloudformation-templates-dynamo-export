@@ -1,0 +1,391 @@
+Description: Creates a Data Pipeline for exporting a DynamoDB table to S3, converting the export to Parquet, and loading the data into the Glue catalog. Requires the "common" stack to be deployed.
+Parameters:
+  TableName:
+    Description: Name of the DynamoDB table to export
+    Type: String
+  MaxConsumedReadThroughput:
+    Description: Percentage of read throughput Data Pipelines is allowed to use from the DynamoDB table to export the data to S3. Expressed as a float between 0.0 and 1.0
+    Type: Number
+    MinValue: 0
+    MaxValue: 1
+    Default: 0.2
+  ExportTimeout:
+    Description: Timeout on the export process in hours
+    Type: Number
+    Default: 1
+Resources:
+  ExportSuccessTopic:
+    Type: AWS::SNS::Topic
+    DependsOn:
+    - ExportSuccessTrigger
+    Properties:
+      TopicName:
+        Fn::Sub:
+        - "${Name}ExportSuccess"
+        - Name:
+            Ref: TableName
+      Subscription:
+      - Protocol: "lambda"
+        Endpoint:
+          Fn::GetAtt:
+          - ExportSuccessTrigger
+          - Arn
+
+  ExportSuccessTriggerInvokePermission:
+    Type: AWS::Lambda::Permission
+    DependsOn:
+    - ExportSuccessTopic
+    - ExportSuccessTrigger
+    Properties:
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn:
+        Ref: ExportSuccessTopic
+      FunctionName:
+        Fn::GetAtt:
+        - ExportSuccessTrigger
+        - Arn
+
+  ExportSuccessTrigger:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName:
+        Fn::Sub:
+        - "${Name}ExportSuccessTrigger"
+        - Name:
+            Ref: TableName
+      Handler: "index.export_success_trigger"
+      Runtime: python2.7
+      Timeout: "10"
+      Role:
+        Fn::ImportValue: ExportSuccessExecutionRoleArn
+      Code:
+        ZipFile:
+          Fn::Sub:
+          - |-
+            from __future__ import print_function
+            import json
+            import os
+            import logging
+            import boto3
+
+            LOGGER = logging.getLogger()
+            LOGGER.setLevel(logging.INFO)
+
+            GLUE_CLIENT = boto3.client('glue')
+
+            def export_success_trigger(event, context):
+                message = json.loads(event['Records'][0]['Sns']['Message'])
+                backup_type = message.get("type")
+                LOGGER.info(message)
+
+                if backup_type != "dynamodb":
+                    LOGGER.info("backup type was not dynamodb. skipping glue job invocation")
+                    return
+
+                inpt = message["location"]
+                output = inpt
+                # Formatting the backup date so Athena will name the date partition as ddb_export_timestamp
+                backup_date = output.split("/")[-1]
+                partition = "%s=%s" % ("ddb_export_timestamp", backup_date)
+                output = output.replace("/raw/", "/parquet/", 1)
+                output = output.replace(backup_date, partition)
+
+                LOGGER.info("converting backup at %s to parquet at %s" % (inpt, output))
+
+                GLUE_CLIENT.start_job_run(
+                    JobName="${TableName}ExportToParquet",
+                    Arguments={"--backup_location": inpt, "--output_location": output}
+                )
+
+                return True
+          - TableName:
+              Ref: TableName
+
+  ExportFailureTopic:
+    Type: AWS::SNS::Topic
+    DependsOn:
+    - ExportFailureTrigger
+    Properties:
+      TopicName:
+        Fn::Sub:
+        - "${Name}ExportFailure"
+        - Name:
+            Ref: TableName
+      Subscription:
+      - Protocol: "lambda"
+        Endpoint:
+          Fn::GetAtt:
+          - ExportFailureTrigger
+          - Arn
+
+  ExportFailureTriggerInvokePermission:
+    Type: AWS::Lambda::Permission
+    DependsOn:
+    - ExportFailureTopic
+    - ExportFailureTrigger
+    Properties:
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn:
+        Ref: ExportFailureTopic
+      FunctionName:
+        Fn::GetAtt:
+        - ExportFailureTrigger
+        - Arn
+
+  ExportFailureTrigger:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName:
+        Fn::Sub:
+        - "${Name}ExportFailureTrigger"
+        - Name:
+            Ref: TableName
+      Handler: "index.export_failure_trigger"
+      Runtime: python2.7
+      Timeout: "5"
+      Role:
+        Fn::ImportValue: ExportFailureExecutionRole
+      Code:
+        ZipFile: |
+          import logging
+
+          LOGGER = logging.getLogger()
+          LOGGER.setLevel(logging.INFO)
+          def export_failure_trigger(event, context):
+            LOGGER.info(event)
+            return True
+
+  ExportConverterGlueJob:
+    Type: "AWS::Glue::Job"
+    Properties:
+      Name:
+        Fn::Sub:
+        - "${Name}ExportToParquet"
+        - Name:
+            Ref: TableName
+      Role:
+        Fn::ImportValue: GlueCrawlerAndJobRole
+      MaxRetries: 3
+      Description: converts an arbitrary DynamoDB export into Apache Parquet
+      Command:
+        # DO NOT CHANGE NAME. CloudFormation docs are wrong. Use Glue API docs:
+        # http://docs.aws.amazon.com/glue/latest/dg/aws-glue-api-jobs-job.html#aws-glue-api-jobs-job-JobCommand
+        Name: "glueetl"
+        ScriptLocation: "s3://aws-bigdata-blog/artifacts/goodreads-dynamodb/dynamodb-export-to-parquet.py"
+      AllocatedCapacity: 30
+      ExecutionProperty:
+        MaxConcurrentRuns: 3
+      DefaultArguments:
+        "--TempDir":
+          Fn::Sub:
+          - "s3://${Bucket}/glue-temp-dir"
+          - Bucket:
+              Fn::ImportValue: DynamoDBExportsBucket
+
+  GlueCrawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Role:
+        Fn::ImportValue: GlueCrawlerAndJobRole
+      Name:
+        Fn::Sub:
+        - "${Name}ParquetCrawler"
+        - Name:
+            Ref: TableName
+      Description:
+        Fn::Sub:
+        - "Add new partitions to the ${Name} table"
+        - Name:
+            Ref: TableName
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: DELETE_FROM_DATABASE
+      Schedule:
+        # Run every day at 1200 UTC (4am PST)
+        ScheduleExpression: "cron(0 12 * * ? *)"
+      DatabaseName: "dynamodb-exports"
+      Targets:
+        S3Targets:
+        - Path:
+            Fn::Sub:
+            - "s3://${Bucket}/parquet/${TableName}"
+            - Bucket:
+                Fn::ImportValue: DynamoDBExportsBucket
+              TableName:
+                Ref: TableName
+
+  ExportDataPipeline:
+    Type: "AWS::DataPipeline::Pipeline"
+    Properties:
+      Name:
+        Fn::Sub:
+        - "${Name}Export"
+        - Name:
+            Ref: TableName
+      Description:
+        Fn::Sub:
+        - "Pipeline to backup the DynamoDB Table ${Name} to S3"
+        - Name:
+            Ref: TableName
+      Activate: true
+      ParameterObjects:
+      - Id: "myDDBReadThroughputRatio"
+        Attributes:
+        - Key: "description"
+          StringValue: "DynamoDB read throughput ratio"
+        - Key: "type"
+          StringValue: "Double"
+        - Key: "default"
+          StringValue: "0.1"
+      - Id: "myOutputS3Loc"
+        Attributes:
+        - Key: "description"
+          StringValue: "S3 output bucket"
+        - Key: "type"
+          StringValue: "String"
+      - Id: "myDDBTableName"
+        Attributes:
+        - Key: "description"
+          StringValue: "DynamoDB Table Name"
+        - Key: "type"
+          StringValue: "String"
+      ParameterValues:
+      - Id: "myDDBTableName"
+        StringValue:
+          Ref: TableName
+      - Id: "myDDBReadThroughputRatio"
+        StringValue:
+          Ref: MaxConsumedReadThroughput
+      - Id: "myOutputS3Loc"
+        StringValue:
+          Fn::Sub:
+          - "s3://${Bucket}/raw/${TableName}"
+          - Bucket:
+              Fn::ImportValue: DynamoDBExportsBucket
+            TableName:
+              Ref: TableName
+      PipelineObjects:
+      - Id: "Default"
+        Name: "Default"
+        Fields:
+        - Key: "type"
+          StringValue: "Default"
+        - Key: "scheduleType"
+          StringValue: "cron"
+        - Key: "schedule"
+          RefValue: DefaultSchedule
+        - Key: "failureAndRerunMode"
+          StringValue: "CASCADE"
+        - Key: "role"
+          StringValue:
+            Fn::ImportValue: DataPipelinesDynamoDBExportRole
+        - Key: "resourceRole"
+          StringValue:
+            Fn::ImportValue: EC2DynamoDBExportInstanceProfile
+        - Key: "pipelineLogUri"
+          StringValue:
+            Fn::Sub:
+            - s3://${Bucket}/data-pipelines/logs
+            - Bucket:
+                Fn::ImportValue: DynamoDBExportsBucket
+      - Id: "DefaultSchedule"
+        Name: "DefaultSchedule"
+        Fields:
+        - Key: "type"
+          StringValue: "Schedule"
+        - Key: "period"
+          StringValue: "1 days"
+        - Key: "startAt"
+          StringValue: "FIRST_ACTIVATION_DATE_TIME"
+      - Id: "EmrClusterForBackup"
+        Name: "EmrClusterForBackup"
+        Fields:
+        - Key: "terminateAfter"
+          StringValue:
+            Fn::Sub:
+            - "${Time} HOURS"
+            - Time:
+                Ref: ExportTimeout
+        - Key: "amiVersion"
+          StringValue: "3.9.0"
+        - Key: "masterInstanceType"
+          StringValue: "m3.xlarge"
+        - Key: "coreInstanceType"
+          StringValue: "m3.xlarge"
+        - Key: "coreInstanceCount"
+          StringValue: "1"
+        - Key: "type"
+          StringValue: "EmrCluster"
+        - Key: "bootstrapAction"
+          StringValue:
+            Fn::Sub: "s3://${AWS::Region}.elasticmapreduce/bootstrap-actions/configure-hadoop, --yarn-key-value,yarn.nodemanager.resource.memory-mb=11520,--yarn-key-value,yarn.scheduler.maximum-allocation-mb=11520,--yarn-key-value,yarn.scheduler.minimum-allocation-mb=1440,--yarn-key-value,yarn.app.mapreduce.am.resource.mb=2880,--mapred-key-value,mapreduce.map.memory.mb=5760,--mapred-key-value,mapreduce.map.java.opts=-Xmx4608M,--mapred-key-value,mapreduce.reduce.memory.mb=2880,--mapred-key-value,mapreduce.reduce.java.opts=-Xmx2304m,--mapred-key-value,mapreduce.map.speculative=false"
+      - Id: DDBSourceTable
+        Name: DDBSourceTable
+        Fields:
+        - Key: "type"
+          StringValue: "DynamoDBDataNode"
+        - Key: "tableName"
+          StringValue: "#{myDDBTableName}"
+        - Key: "readThroughputPercent"
+          StringValue: "#{myDDBReadThroughputRatio}"
+      - Id: S3BackupLocation
+        Name: S3BackupLocation
+        Fields:
+        - Key: "type"
+          StringValue: "S3DataNode"
+        - Key: "directoryPath"
+          StringValue: "#{myOutputS3Loc}/#{format(@scheduledStartTime, 'YYYY-MM-dd-HH-mm-ss')}"
+      - Id: SuccessNotification
+        Name: SuccessNotification
+        Fields:
+        - Key: "type"
+          StringValue: "SnsAlarm"
+        - Key: "topicArn"
+          StringValue:
+            Ref: ExportSuccessTopic
+        - Key: "role"
+          StringValue:
+            Fn::ImportValue: DataPipelinesDynamoDBExportRole
+        - Key: "subject"
+          StringValue: "#{myDDBTableName} Data Pipeline Finished"
+        - Key: "message"
+          StringValue: "{\"type\":\"dynamodb\",\"resource_name\":\"#{myDDBTableName}\",\"location\":\"#{myOutputS3Loc}/#{format(node.@scheduledStartTime,'YYYY-MM-dd-HH-mm-ss')}\",\"message\":\"Backed up #{myDDBTableName} to #{myOutputS3Loc}/#{format(node.@scheduledStartTime,'YYYY-MM-dd')}\"}"
+      - Id: FailureNotification
+        Name: FailureNotification
+        Fields:
+        - Key: "type"
+          StringValue: "SnsAlarm"
+        - Key: "topicArn"
+          StringValue:
+            Ref: ExportFailureTopic
+        - Key: "role"
+          StringValue:
+            Fn::ImportValue: DataPipelinesDynamoDBExportRole
+        - Key: "subject"
+          StringValue: "#{myDDBTableName} Data Pipeline Failed"
+        - Key: "message"
+          StringValue: "{\"type\":\"dynamodb\",\"resource_name\":\"#{myDDBTableName}\",\"location\":\"#{myOutputS3Loc}/#{format(node.@scheduledStartTime,'YYYY-MM-dd-HH-mm-ss')}\",\"message\":\"Failed to backup #{myDDBTableName} to #{myOutputS3Loc}/#{format(node.@scheduledStartTime,'YYYY-MM-dd')}\"}"
+      - Id: TableBackupActivity
+        Name: TableBackupActivity
+        Fields:
+        - Key: "type"
+          StringValue: "EmrActivity"
+        - Key: "input"
+          RefValue: "DDBSourceTable"
+        - Key: "output"
+          RefValue: "S3BackupLocation"
+        - Key: "resizeClusterBeforeRunning"
+          StringValue: "true"
+        - Key: "runsOn"
+          RefValue: "EmrClusterForBackup"
+        - Key: "maximumRetries"
+          StringValue: "2"
+        - Key: "step"
+          StringValue:
+            Fn::Sub: "s3://dynamodb-emr-${AWS::Region}/emr-ddb-storage-handler/2.1.0/emr-ddb-2.1.0.jar,org.apache.hadoop.dynamodb.tools.DynamoDbExport,#{output.directoryPath},#{input.tableName},#{input.readThroughputPercent}"
+        - Key: "onSuccess"
+          RefValue: "SuccessNotification"
+        - Key: "onFail"
+          RefValue: "FailureNotification"
